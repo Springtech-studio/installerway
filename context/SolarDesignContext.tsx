@@ -143,7 +143,9 @@ export interface BOMItem {
   totalPrice: number;
 }
 
+// Support both naming conventions across all pages
 export type DesignScale = "residential" | "commercial" | "minigrid";
+export type InstallationScale = DesignScale;
 
 interface SolarDesignContextType {
   currentUser: User | null;
@@ -190,7 +192,7 @@ interface SolarDesignContextType {
   saveActiveProjectToCloud: () => Promise<void>;
 }
 
-// --- Concrete Non-Undefined Defaults ---
+// --- Defaults ---
 
 const DEFAULT_PROFILE: EngineerProfile = {
   fullName: "Field Solar Practitioner",
