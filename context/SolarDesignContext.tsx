@@ -168,3 +168,34 @@ export function useSolarDesign() {
   if (!context) throw new Error("useSolarDesign must be used within a SolarDesignProvider");
   return context;
 }
+// Inside SolarDesignProvider in context/SolarDesignContext.tsx
+useEffect(() => {
+  const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    if (!currentUser) return;
+
+    try {
+      // 1. Fetch cross-device engineer profile
+      const profRef = doc(db, "engineers", currentUser.uid);
+      const profSnap = await getDoc(profRef);
+      if (profSnap.exists()) {
+        const cloudData = profSnap.data();
+        // Update context state and local cache
+        setEngineerProfile(cloudData);
+        localStorage.setItem("installerway_profile", JSON.stringify(cloudData));
+      }
+
+      // 2. Fetch cross-device active project / designs if available
+      const projRef = doc(db, "projects", currentUser.uid);
+      const projSnap = await getDoc(projRef);
+      if (projSnap.exists()) {
+        const cloudProject = projSnap.data();
+        if (cloudProject.loads) setAuditLoads(cloudProject.loads);
+        if (cloudProject.systemSize) setSystemSizing(cloudProject.systemSize);
+      }
+    } catch (err) {
+      console.warn("Cross-device sync note:", err);
+    }
+  });
+
+  return () => unsubscribe();
+}, []);
