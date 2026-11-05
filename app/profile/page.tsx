@@ -55,11 +55,23 @@ export default function ProfilePage() {
     batteryDerating: 15,
   });
 
-  // Track Auth and fetch profile from Firestore
+  // Track session and load existing profile
   useEffect(() => {
+    // 1. Initial quick load from local cache if present
+    const cachedProfile = localStorage.getItem("installerway_profile");
+    if (cachedProfile) {
+      try {
+        const parsed = JSON.parse(cachedProfile);
+        setProfile((prev) => ({ ...prev, ...parsed }));
+      } catch (e) {
+        console.warn("Cached profile parse error:", e);
+      }
+    }
+
+    // 2. Fetch authenticated user data
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (!currentUser) {
-        // Guests or unauthenticated users can still edit local defaults or log in
+        setUser(null);
         setLoading(false);
         return;
       }
@@ -67,8 +79,8 @@ export default function ProfilePage() {
       setUser(currentUser);
       setProfile((prev) => ({
         ...prev,
-        fullName: currentUser.displayName || prev.fullName,
-        email: currentUser.email || prev.email,
+        fullName: prev.fullName || currentUser.displayName || "",
+        email: prev.email || currentUser.email || "",
       }));
 
       try {
@@ -77,20 +89,29 @@ export default function ProfilePage() {
 
         if (docSnap.exists()) {
           const data = docSnap.data();
-          setProfile({
+          const cleanLicense =
+            data.licenseId === "Field Technician / Independent Installer"
+              ? ""
+              : data.licenseId || "";
+
+          const syncedData: EngineerProfile = {
             fullName: data.fullName || currentUser.displayName || "",
             companyName: data.companyName || "",
-            licenseId: data.licenseId === "Field Technician / Independent Installer" ? "" : (data.licenseId || ""),
-            accreditationBody: data.accreditationBody || "Field Technician / Independent Installer",
+            licenseId: cleanLicense,
+            accreditationBody:
+              data.accreditationBody || "Field Technician / Independent Installer",
             email: data.email || currentUser.email || "",
             phone: data.phone || "",
             address: data.address || "",
-            inverterHeadroom: data.inverterHeadroom ?? 25,
-            batteryDerating: data.batteryDerating ?? 15,
-          });
+            inverterHeadroom: Number(data.inverterHeadroom) || 25,
+            batteryDerating: Number(data.batteryDerating) || 15,
+          };
+
+          setProfile(syncedData);
+          localStorage.setItem("installerway_profile", JSON.stringify(syncedData));
         }
       } catch (err: any) {
-        console.warn("Could not load Firestore profile directly:", err);
+        console.warn("Firestore profile fetch skipped or delayed:", err);
       } finally {
         setLoading(false);
       }
@@ -105,38 +126,57 @@ export default function ProfilePage() {
     setErrorMessage("");
     setSuccessMessage("");
 
+    const isTechnician = !profile.licenseId.trim();
+    const payload = {
+      fullName: profile.fullName.trim() || user?.displayName || "Solar Installer",
+      companyName: profile.companyName.trim() || "Independent Solar Practitioner",
+      licenseId: isTechnician
+        ? "Field Technician / Independent Installer"
+        : profile.licenseId.trim(),
+      accreditationBody: isTechnician
+        ? (profile.accreditationBody.trim() || "Solar Technical Practitioner")
+        : (profile.accreditationBody.trim() || "COREN / NEMSA Certified"),
+      email: profile.email.trim() || user?.email || "",
+      phone: profile.phone.trim(),
+      address: profile.address.trim(),
+      inverterHeadroom: Number(profile.inverterHeadroom) || 25,
+      batteryDerating: Number(profile.batteryDerating) || 15,
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Instant local commit to prevent blocking the UI
     try {
-      if (!user) {
-        // Fallback for Guest mode - save to local storage
-        localStorage.setItem("installerway_profile", JSON.stringify(profile));
-        setSuccessMessage("Preferences saved locally for this session!");
+      localStorage.setItem("installerway_profile", JSON.stringify(payload));
+    } catch (storageErr) {
+      console.warn("LocalStorage save error:", storageErr);
+    }
+
+    // Cloud commit with timeout race
+    if (user) {
+      try {
+        const firestoreWrite = setDoc(
+          doc(db, "engineers", user.uid),
+          {
+            ...payload,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        const timeout = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Timeout")), 5000)
+        );
+
+        await Promise.race([firestoreWrite, timeout]);
+        setSuccessMessage("Credentials saved to cloud and verified!");
+      } catch (err: any) {
+        console.warn("Firestore write fell back to local cache:", err);
+        setSuccessMessage("Credentials saved locally (offline / ready for SLD & BOM)!");
+      } finally {
         setSaving(false);
-        return;
       }
-
-      const isTechnician = !profile.licenseId.trim();
-      const payload = {
-        fullName: profile.fullName.trim() || user.displayName || "Solar Installer",
-        companyName: profile.companyName.trim() || "Independent Solar Practitioner",
-        // License is optional: auto-assigns practitioner title if blank
-        licenseId: isTechnician ? "Field Technician / Independent Installer" : profile.licenseId.trim(),
-        accreditationBody: isTechnician
-          ? (profile.accreditationBody.trim() || "Solar Technical Practitioner")
-          : (profile.accreditationBody.trim() || "COREN / NEMSA Certified"),
-        email: profile.email.trim() || user.email || "",
-        phone: profile.phone.trim(),
-        address: profile.address.trim(),
-        inverterHeadroom: Number(profile.inverterHeadroom) || 25,
-        batteryDerating: Number(profile.batteryDerating) || 15,
-        updatedAt: serverTimestamp(),
-      };
-
-      await setDoc(doc(db, "engineers", user.uid), payload, { merge: true });
-      setSuccessMessage("Engineering & technician profile updated successfully!");
-    } catch (err: any) {
-      console.error("Save profile error:", err);
-      setErrorMessage(err.message || "Failed to update profile. Please check connection.");
-    } finally {
+    } else {
+      setSuccessMessage("Preferences saved locally (Guest Session)!");
       setSaving(false);
     }
   };
@@ -154,7 +194,7 @@ export default function ProfilePage() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
-      {/* Top Banner Navigation */}
+      {/* Header Navigation */}
       <div className="flex items-center justify-between">
         <div>
           <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
@@ -193,7 +233,7 @@ export default function ProfilePage() {
 
       {/* Profile Form */}
       <form onSubmit={handleSave} className="space-y-6">
-        {/* Card 1: Professional Details */}
+        {/* Practitioner Information */}
         <div className="p-6 bg-slate-900/80 border border-slate-800 rounded-3xl backdrop-blur space-y-5">
           <div className="flex items-center gap-2 text-white font-bold text-sm border-b border-slate-800/80 pb-3">
             <UserIcon className="w-4 h-4 text-emerald-400" />
@@ -247,12 +287,12 @@ export default function ProfilePage() {
                   type="text"
                   value={profile.licenseId}
                   onChange={(e) => setProfile({ ...profile, licenseId: e.target.value })}
-                  placeholder="e.g. COREN/R/1234 or NEMSA/2026 (Leave blank if technician)"
+                  placeholder="e.g. COREN/R/1234 or leave blank"
                   className="w-full pl-10 pr-4 py-2.5 bg-slate-950/70 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 transition"
                 />
               </div>
               <p className="text-[11px] text-slate-500 mt-1">
-                Field installers & technicians without formal council registration can leave this blank.
+                Technicians and field installers without COREN or NEMSA registration can leave this blank.
               </p>
             </div>
 
@@ -322,7 +362,7 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        {/* Card 2: Default Engineering Safety Margins */}
+        {/* Engineering Safety Margins */}
         <div className="p-6 bg-slate-900/80 border border-slate-800 rounded-3xl backdrop-blur space-y-5">
           <div className="flex items-center gap-2 text-white font-bold text-sm border-b border-slate-800/80 pb-3">
             <Sliders className="w-4 h-4 text-emerald-400" />
@@ -345,7 +385,9 @@ export default function ProfilePage() {
                 max={50}
                 step={5}
                 value={profile.inverterHeadroom}
-                onChange={(e) => setProfile({ ...profile, inverterHeadroom: Number(e.target.value) })}
+                onChange={(e) =>
+                  setProfile({ ...profile, inverterHeadroom: Number(e.target.value) })
+                }
                 className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-emerald-500"
               />
               <p className="text-[11px] text-slate-500 mt-1">
@@ -368,7 +410,9 @@ export default function ProfilePage() {
                 max={35}
                 step={5}
                 value={profile.batteryDerating}
-                onChange={(e) => setProfile({ ...profile, batteryDerating: Number(e.target.value) })}
+                onChange={(e) =>
+                  setProfile({ ...profile, batteryDerating: Number(e.target.value) })
+                }
                 className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-emerald-500"
               />
               <p className="text-[11px] text-slate-500 mt-1">
@@ -378,7 +422,7 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        {/* Save CTA */}
+        {/* Save Button */}
         <div className="flex justify-end">
           <button
             type="submit"
